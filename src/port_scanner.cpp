@@ -8,6 +8,7 @@
 #include <iostream>
 #include <set>
 #include <stdexcept>
+#include <unordered_set>
 
 #include "port_scanner.h"
 
@@ -19,12 +20,11 @@ Port_scanner::Port_scanner(std::string& ip)
 }
 
 std::vector<int> Port_scanner::scan(int first_port, int last_port) {
-  //проверка на маленькое количество протов надо добавить;
   vec_thread.resize(number_thread);
   int first_port_for_task = first_port;
   if (last_port - first_port + 1 > number_thread) {
     int step = (last_port - first_port + 1) / vec_thread.size();
-    ports_on_thread = step;
+
     for (size_t i = 0; i < vec_thread.size() - 1; i++) {
       vec_thread[i] =
           std::thread(&Port_scanner::task_scan, this, first_port_for_task,
@@ -43,73 +43,70 @@ std::vector<int> Port_scanner::scan(int first_port, int last_port) {
   return open_port;
 }
 
-void Port_scanner::task_scan(int begin_port_loop, int end_port_loop) {  
-    int epollfd = epoll_create1(0);
-    std::unordered_map<int, int> sock_port_map;
-    if (epollfd < 0)
-      throw std::runtime_error("epoll_create1:" + std::to_string(errno));
-    std::set<int> port;
-    int port_count = end_port_loop - begin_port_loop + 1;
-    try {
-      for (size_t i = begin_port_loop; i <= end_port_loop; i++) {
-        int socketfd = socket(AF_INET, SOCK_STREAM, 0);
-        if (socketfd <= 0) {
-          throw std::runtime_error("socket :" + std::to_string(errno));
-        }
-
-        sockaddr_in server_address;
-        server_address.sin_family = AF_INET;
-        server_address.sin_addr = bin_ip;
-        server_address.sin_port = htons(i);
-        epoll_event ev;
-        ev.events = EPOLLOUT | EPOLLIN ;//| EPOLLERR;
-        ev.data.fd = socketfd;
-
-        //установка ограничения на количество повторных syn запросов
-        int opt = 1;
-        int opt_len = sizeof(opt);
-        setsockopt(socketfd, IPPROTO_TCP, TCP_SYNCNT, &opt, opt_len);
-
-
-        sock_port_map.emplace(socketfd, i);
-
-        //установка в не блокирующее состояние
-        fcntl(socketfd, F_SETFL, O_NONBLOCK);
-
-        int connect_status =
-            connect(socketfd, (struct sockaddr*)&server_address,
-                    sizeof(server_address));
-        //добовление в epoll
-        if (epoll_ctl(epollfd, EPOLL_CTL_ADD, socketfd, &ev) < 0) {
-          throw std::runtime_error("  " + std::to_string(i) +
-                                   "epoll_ctl:" + std::to_string(errno));
-        }
-      }
-      std::vector<int> open_sock = read_epoll(epollfd, port_count);
-      for (auto elem : open_sock) {
-        std::lock_guard<std::mutex> lock(_mutex);
-        open_port.push_back(sock_port_map[elem]);
-      }
-      for(auto elem: sock_port_map){
-        close(elem.first);
+void Port_scanner::task_scan(int begin_port_loop, int end_port_loop) {
+  int epollfd = epoll_create1(0);
+  std::unordered_map<int, int> sock_port_map;
+  std::unordered_set<int> created_sockets;  //для удаления сокетов которые по
+                                            //истечению таймера не были удалены
+  if (epollfd < 0)
+    throw std::runtime_error("epoll_create1:" + std::to_string(errno));
+  int port_count = end_port_loop - begin_port_loop + 1;
+  try {
+    for (size_t i = begin_port_loop; i <= end_port_loop; i++) {
+      int socketfd = socket(AF_INET, SOCK_STREAM, 0);
+      if (socketfd <= 0) {
+        throw std::runtime_error("socket :" + std::to_string(errno));
       }
 
-    } catch (const std::exception& e) {
-      std::cerr << e.what() << '\n';
-    }  
+      sockaddr_in server_address;
+      server_address.sin_family = AF_INET;
+      server_address.sin_addr = bin_ip;
+      server_address.sin_port = htons(i);
+      epoll_event ev;
+      ev.events = EPOLLOUT | EPOLLIN;
+      ev.data.fd = socketfd;
+
+      //установка ограничения на количество повторных syn запросов
+      int opt = 1;
+      int opt_len = sizeof(opt);
+      setsockopt(socketfd, IPPROTO_TCP, TCP_SYNCNT, &opt, opt_len);
+
+      sock_port_map.emplace(socketfd, i);
+      fcntl(socketfd, F_SETFL, O_NONBLOCK);
+
+      int connect_status = connect(socketfd, (struct sockaddr*)&server_address,
+                                   sizeof(server_address));
+      //добовление в epoll
+      if (epoll_ctl(epollfd, EPOLL_CTL_ADD, socketfd, &ev) < 0) {
+        throw std::runtime_error("  " + std::to_string(i) +
+                                 "epoll_ctl:" + std::to_string(errno));
+      }
+      created_sockets.emplace(socketfd);
+    }
+    std::vector<int> open_sock =
+        read_epoll(epollfd, port_count, created_sockets);
+    for (auto elem : open_sock) {
+      std::lock_guard<std::mutex> lock(_mutex);
+      open_port.push_back(sock_port_map[elem]);
+    }
+    for (auto elem : created_sockets) {
+      close(elem);
+    }
+  } catch (const std::exception& e) {
+    std::cerr << e.what() << '\n';
+  }
 }
 
-std::vector<int> Port_scanner::read_epoll(int epollfd, int port_count) {
+std::vector<int> Port_scanner::read_epoll(
+    int epollfd, int port_count, std::unordered_set<int>& created_sockets) {
   std::vector<int> open_sock;
   epoll_event* events = new epoll_event[port_count];
-  int count_events = 0;
-  do {
-    //std::cout << "start\n";
+  int count_events = -1;
+  while (count_events) {
     count_events = epoll_wait(epollfd, events, port_count, 2000);
     if (count_events == -1) {
       throw std::runtime_error("epoll_wait:" + std::to_string(errno));
-    } else if(count_events == 0) break;
-    else {
+    } else {
       for (int i = 0; i < count_events; ++i) {
         int sockfd = events[i].data.fd;
         int socketError;
@@ -120,10 +117,10 @@ std::vector<int> Port_scanner::read_epoll(int epollfd, int port_count) {
           open_sock.push_back(sockfd);
         }
         close(sockfd);
-        //--port_count;
+        created_sockets.erase(sockfd);
       }
     }
-  } while (true);//port_count > 0);
+  }
   delete[] events;
   return open_sock;
 }
