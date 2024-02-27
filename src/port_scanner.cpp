@@ -43,12 +43,7 @@ std::vector<int> Port_scanner::scan(int first_port, int last_port) {
   return open_port;
 }
 
-void Port_scanner::task_scan(int begin_port, int end_port) {
-  for (int i = begin_port; i <= end_port;
-       i += 501) {  //деление большой задачи на более мелкие чтобы не превысить
-                    //количество возможных дескрипторов
-    int begin_port_loop = i;
-    int end_port_loop = (i + 500 <= end_port) ? (i + 500) : end_port;
+void Port_scanner::task_scan(int begin_port_loop, int end_port_loop) {  
     int epollfd = epoll_create1(0);
     std::unordered_map<int, int> sock_port_map;
     if (epollfd < 0)
@@ -67,13 +62,14 @@ void Port_scanner::task_scan(int begin_port, int end_port) {
         server_address.sin_addr = bin_ip;
         server_address.sin_port = htons(i);
         epoll_event ev;
-        ev.events = EPOLLOUT | EPOLLIN | EPOLLERR;
+        ev.events = EPOLLOUT | EPOLLIN ;//| EPOLLERR;
         ev.data.fd = socketfd;
 
         //установка ограничения на количество повторных syn запросов
         int opt = 1;
         int opt_len = sizeof(opt);
         setsockopt(socketfd, IPPROTO_TCP, TCP_SYNCNT, &opt, opt_len);
+
 
         sock_port_map.emplace(socketfd, i);
 
@@ -94,22 +90,26 @@ void Port_scanner::task_scan(int begin_port, int end_port) {
         std::lock_guard<std::mutex> lock(_mutex);
         open_port.push_back(sock_port_map[elem]);
       }
+      for(auto elem: sock_port_map){
+        close(elem.first);
+      }
 
     } catch (const std::exception& e) {
       std::cerr << e.what() << '\n';
-    }
-  }
+    }  
 }
 
 std::vector<int> Port_scanner::read_epoll(int epollfd, int port_count) {
   std::vector<int> open_sock;
-  epoll_event* events = new epoll_event[max_events];
+  epoll_event* events = new epoll_event[port_count];
   int count_events = 0;
   do {
-    count_events = epoll_wait(epollfd, events, max_events, 200);
+    //std::cout << "start\n";
+    count_events = epoll_wait(epollfd, events, port_count, 2000);
     if (count_events == -1) {
       throw std::runtime_error("epoll_wait:" + std::to_string(errno));
-    } else {
+    } else if(count_events == 0) break;
+    else {
       for (int i = 0; i < count_events; ++i) {
         int sockfd = events[i].data.fd;
         int socketError;
@@ -120,10 +120,10 @@ std::vector<int> Port_scanner::read_epoll(int epollfd, int port_count) {
           open_sock.push_back(sockfd);
         }
         close(sockfd);
-        --port_count;
+        //--port_count;
       }
     }
-  } while (port_count > 0);
+  } while (true);//port_count > 0);
   delete[] events;
   return open_sock;
 }
