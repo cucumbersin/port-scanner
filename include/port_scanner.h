@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class Port_scanner {
@@ -15,12 +16,13 @@ class Port_scanner {
 
  private:
   void task_scan(int begin_port, int end_port);
-  std::vector<int> read_epoll(int epollfd, int port_count);
+  std::vector<int> read_epoll(int epollfd, int port_count,
+                              std::unordered_set<int>& created_sockets);
   std::mutex _mutex;
   int number_thread;
   std::vector<std::thread> vec_thread;
   in_addr bin_ip;
-  const static int max_events = 1000;
+  const static int max_events = 100;
   int ports_on_thread;
   std::vector<int> open_port;
 };

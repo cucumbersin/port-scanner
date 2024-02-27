@@ -3,6 +3,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/epoll.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -16,8 +17,18 @@
 #include "port_scanner.h"
 
 int main(int argc, char const *argv[]) {
+  //Увеличение количества файловых дескрипторов на процесс
+  struct rlimit rl;
+  rl.rlim_cur = 65536;
+  rl.rlim_max = 65536;
+  if (setrlimit(RLIMIT_NOFILE, &rl) == -1) {
+    std::cout << "Permission denied\n";
+    return 1;
+  }
+
   if (!argument_check(argc, argv)) {
-    std::cout << "not valid argument\n" << "input format: scanner <IP> <port_first> <port_last>\n";
+    std::cout << "not valid argument\n"
+              << "input format: scanner <IP> <port_first> <port_last>\n";
     return 0;
   }
 
